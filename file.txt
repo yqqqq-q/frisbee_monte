@@ -1,0 +1,67 @@
+Final Answer
+
+### Case \(p = A\)
+
+The value function \(W(x,A)\) represents the probability that Team A wins given they have possession at position \(x\). The corrected integral equation is:
+
+\[
+W(x,A) = \int_{d_{\min}}^{d_{\max}} P_A(d \mid x) \left[ \underbrace{T_A(d \mid x) \mathbf{1}_{\{x+d \in \mathcal{E}_A\}}}_{\text{Team A Scores}} + \underbrace{T_A(d \mid x) \mathbf{1}_{\{x+d \in [0, (1-\alpha)D_{\mathrm{full}})\}} W(x+d, A)}_{\text{Successful Pass (No Score)}} + \underbrace{\left(1 - T_A(d \mid x) \mathbf{1}_{\{x+d \in [0, D_{\mathrm{full}}]\}}\right) W(\tilde{x}, B)}_{\text{Turnover (Incomplete or Out-of-Bounds)}} \right] dd
+\]
+
+---
+
+### Case \(p = B\)
+
+The value function \(W(x,B)\) represents the probability that Team A wins given Team B has possession at position \(x\). The corrected integral equation is:
+
+\[
+W(x,B) = \int_{d_{\min}}^{d_{\max}} P_B(d \mid x) \left[ \underbrace{T_B(d \mid x) \mathbf{1}_{\{x-d \in (\alpha D_{\mathrm{full}}, D_{\mathrm{full}}]\}} W(x-d, B)}_{\text{Successful Pass (No Score)}} + \underbrace{\left(1 - T_B(d \mid x) \mathbf{1}_{\{x-d \in [0, D_{\mathrm{full}}]\}}\right) W(\hat{x}, A)}_{\text{Turnover (Incomplete or Out-of-Bounds)}} \right] dd
+\]
+
+*(Note: The term for Team B scoring is omitted because \(W\) tracks Team A's win probability, and a Team B score results in a value of 0.)*
+
+---
+
+### Definitions of Terms
+
+*   **First Term (Scoring/Success):** The throw is completed (\(T_i\)), the disc is in-bounds (\(\in [0, D_{\mathrm{full}}]\)), and possession is held by the current team.
+*   **Second Term (Transition):** The throw is completed and in-bounds, but does not result in an immediate score; the game continues from the new position.
+*   **Third Term (Turnover):** The throw is either incomplete (\(1-T_i\)) or goes out-of-bounds (\(x \pm d \notin [0, D_{\mathrm{full}}]\)), resulting in a change of possession and a reset to position \(\tilde{x}\) or \(\hat{x}\).
+
+Explanation
+
+Question 1.: Fixing the Value Function for Field Geometry
+Step 1: Defining the Win Conditions and State Transitions
+The value function W(x, p) represents the probability that **Team A** eventually wins, given the current disc position x and the team in possession p. To fix the equations, we must account for three mutually exclusive outcomes of any throw:
+- **Scoring:** The throw is completed in the attacking endzone.
+- **Successful Advance:** The throw is completed in the field of play but outside the endzone.
+- **Turnover:** The throw is either dropped (incomplete) or goes out of bounds (OOB), resulting in a change of possession.
+Step 2: Correcting the Equation for Team A ($p=A$)
+When Team A has the disc, they win immediately if they complete a pass into \mathcal{E}_A. If they complete a pass elsewhere in the field, they retain possession at the new spot. If they fail (drop or OOB), Team B takes over at a reset position \tilde{x}. The corrected integral is:
+
+\begin{split}
+W(x,A) = \int_{d_{\min}}^{d_{\max}} P_A(d \mid x) \Big[ & T_A(d \mid x) \cdot \mathbf{1}_{\{x+d \in \mathcal{E}_A\}} \\
+& + T_A(d \mid x) \cdot \mathbf{1}_{\{x+d \in [0, (1-\alpha)D_{\mathrm{full}})\}} W(x+d, A) \\
+& + \left( 1 - T_A(d \mid x) \cdot \mathbf{1}_{\{x+d \in [0, D_{\mathrm{full}}]\}} \right) W(\tilde{x}, B) \Big] dd
+\end{split}
+
+- The first term is the probability of an immediate win (value 1).
+- The second term is the probability of staying in possession.
+- The third term combines dropped passes and OOB throws into a single turnover event.
+Step 3: Correcting the Equation for Team B ($p=B$)
+When Team B has the disc, W(x, B) still tracks the probability of **Team A** winning. If Team B scores (completes a pass into \mathcal{E}_B), Team A's win probability for that branch is 0. If a turnover occurs, Team A gains possession at reset position \hat{x}.
+
+\begin{split}
+W(x,B) = \int_{d_{\min}}^{d_{\max}} P_B(d \mid x) \Big[ & T_B(d \mid x) \cdot \mathbf{1}_{\{x-d \in (\alpha D_{\mathrm{full}}, D_{\mathrm{full}}]\}} W(x-d, B) \\
+& + \left( 1 - T_B(d \mid x) \cdot \mathbf{1}_{\{x-d \in [0, D_{\mathrm{full}}]\}} \right) W(\hat{x}, A) \Big] dd
+\end{split}
+
+- Note that the "Team B scores" term (T_B \cdot \mathbf{1}_{\{x-d \in \mathcal{E}_B\}} \cdot 0) is omitted because it contributes zero to Team A's win probability.
+Answer: <strong>The corrected system of coupled integral equations for the probability of Team A winning is:
+\begin{split}
+W(x,A) = \int_{d_{\min}}^{d_{\max}} P_A(d \mid x) \Big[ & T_A(d \mid x) \mathbf{1}_{\{x+d \in \mathcal{E}_A\}} + T_A(d \mid x) \mathbf{1}_{\{x+d \in [0, (1-\alpha)D_{\mathrm{full}})\}} W(x+d, A) \\
+& + (1 - T_A(d \mid x) \mathbf{1}_{\{x+d \in [0, D_{\mathrm{full}}]\}}) W(\tilde{x}, B) \Big] dd \\
+W(x,B) = \int_{d_{\min}}^{d_{\max}} P_B(d \mid x) \Big[ & T_B(d \mid x) \mathbf{1}_{\{x-d \in (\alpha D_{\mathrm{full}}, D_{\mathrm{full}}]\}} W(x-d, B) \\
+& + (1 - T_B(d \mid x) \mathbf{1}_{\{x-d \in [0, D_{\mathrm{full}}]\}}) W(\hat{x}, A) \Big] dd
+\end{split}
+where $\tilde{x}$ and $\hat{x}$ are the designated turnover reset positions.</strong>
