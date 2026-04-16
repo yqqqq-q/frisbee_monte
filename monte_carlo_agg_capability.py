@@ -123,6 +123,7 @@ def simulate_possessions(
     rng: np.random.Generator,
     n_possessions: int,
     max_plays: int = 10_000,
+    verbose: bool = False,
 ) -> PossessionSimStats:
     """
     Possession-based simulation consistent with samecapability_aggressivevsdiscrete.py:
@@ -165,7 +166,11 @@ def simulate_possessions(
                     break
             else:
                 offense = team_b if offense is team_a else team_a
-    print(f"Simulated {n_possessions} possessions, {total_throws} throws, {completions} completions, {turnovers} turnovers, total distance {total_distance:.1f}")
+    if verbose:
+        print(
+            f"Simulated {n_possessions} possessions, {total_throws} throws, {completions} completions, "
+            f"{turnovers} turnovers, total distance {total_distance:.1f}"
+        )
     return PossessionSimStats(
         team_a_score=team_a_score,
         team_b_score=team_b_score,
@@ -202,7 +207,7 @@ def run_sweep(
                 for agg_b in aggs:
                     team_a = build_team(beta_cap_a, float(agg_a), 1)
                     team_b = build_team(beta_cap_b, float(agg_b), -1)
-                    stats = simulate_possessions(team_a, team_b, gp, rng, n_possessions)
+                    stats = simulate_possessions(team_a, team_b, gp, rng, n_possessions, verbose=False)
 
                     total_goals = stats.team_a_score + stats.team_b_score
                     win_rate_a = (
@@ -333,7 +338,7 @@ def plot_win_rate_vs_aggressiveness_by_capability_gap(
             agg_b = float(agg_b)
             team_a = build_team(beta_cap_a, agg_a, 1)
             team_b = build_team(beta_cap_b, agg_b, -1)
-            stats = simulate_possessions(team_a, team_b, gp, rng, n_possessions)
+            stats = simulate_possessions(team_a, team_b, gp, rng, n_possessions, verbose=False)
             total_goals = stats.team_a_score + stats.team_b_score
             win_rate_b = (
                 float(stats.team_b_score) / float(total_goals) if total_goals > 0 else float("nan")
@@ -422,6 +427,7 @@ def compute_best_response_surface(
     beta_cap_b: float,
     n_possessions: int = 5_000,
     seed: int = GLOBAL_SEED,
+    verbose_sim: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Compute Team A payoff surface over the full aggressiveness grid.
@@ -444,7 +450,7 @@ def compute_best_response_surface(
         for j, agg_b in enumerate(aggs):
             team_a = build_team(beta_cap_a, float(agg_a), 1)
             team_b = build_team(beta_cap_b, float(agg_b), -1)
-            stats = simulate_possessions(team_a, team_b, gp, rng, n_possessions)
+            stats = simulate_possessions(team_a, team_b, gp, rng, n_possessions, verbose=verbose_sim)
             total_goals = stats.team_a_score + stats.team_b_score
             W[i, j] = (
                 float(stats.team_a_score) / float(total_goals) if total_goals > 0 else float("nan")
@@ -501,50 +507,263 @@ def plot_best_response_surface(
     plt.close(fig)
 
 
+def _equilibrium_cell_from_W(W: np.ndarray, aggs: np.ndarray) -> tuple[int, int, str]:
+    """
+    Select a reference grid cell (i, j) for equilibrium-style aggressiveness reporting.
+
+    Prefer a pure-strategy Nash cell on the discrete grid (mutual best responses).
+    If none exist, run sequential best-response dynamics; on a repeat, snap mean
+    aggressiveness over the detected cycle to the nearest grid indices.
+    """
+    aggs = np.asarray(aggs, dtype=float)
+    n = int(W.shape[0])
+    a_br = np.nanargmax(W, axis=0)
+    b_br = np.nanargmin(W, axis=1)
+
+    pure: list[tuple[int, int]] = []
+    for ii in range(n):
+        for jj in range(n):
+            if int(a_br[jj]) == ii and int(b_br[ii]) == jj:
+                pure.append((ii, jj))
+    if pure:
+        i, j = max(pure, key=lambda ij: (W[ij[0], ij[1]], -ij[0], -ij[1]))
+        return i, j, "pure_nash"
+
+    mid = n // 2
+    i, j = mid, mid
+    path: list[tuple[int, int]] = []
+    for _ in range(500):
+        if int(a_br[j]) == i and int(b_br[i]) == j:
+            return i, j, "br_sink"
+        try:
+            k = path.index((i, j))
+            cycle = path[k:]
+            mean_a = float(np.mean([aggs[p[0]] for p in cycle]))
+            mean_b = float(np.mean([aggs[p[1]] for p in cycle]))
+            i_snap = int(np.argmin(np.abs(aggs - mean_a)))
+            j_snap = int(np.argmin(np.abs(aggs - mean_b)))
+            return i_snap, j_snap, "cycle_mean"
+        except ValueError:
+            path.append((i, j))
+        i, j = int(a_br[j]), int(b_br[i])
+
+    return i, j, "br_cap"
+
+
+def sweep_capability_equilibrium_grid(
+    gp: GameParams,
+    aggs: np.ndarray,
+    capability_grid: np.ndarray | None = None,
+    n_possessions: int = 5_000,
+    seed: int = GLOBAL_SEED,
+) -> tuple[
+    pd.DataFrame,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
+    """
+    For each (team A capability, team B capability) on a square grid in [0.6, 1.0],
+    estimate the aggressiveness payoff surface and record equilibrium-style aggressiveness
+    and Team A win rate at the selected cell.
+
+    Returns
+    -------
+    df:
+        Long-form table with one row per capability pair.
+    caps_a, caps_b:
+        1-D capability coordinates (sorted ascending).
+    Z_agg_A, Z_agg_B, Z_win_A:
+        2-D arrays indexed by (i_cap_a, i_cap_b) matching ``caps_a``, ``caps_b`` order
+        (rows = A capability, columns = B capability).
+    Z_gap, Z_mean_cap:
+        Same shape: capability gap ``beta_cap_A - beta_cap_B`` and mean capability.
+    Z_kind:
+        Same shape, string labels: ``pure_nash``, ``br_sink``, ``cycle_mean``, or ``br_cap``.
+    """
+    if capability_grid is None:
+        capability_grid = np.linspace(0.6, 1.0, 9)
+    caps_a = np.asarray(capability_grid, dtype=float)
+    caps_b = np.asarray(capability_grid, dtype=float)
+    aggs = np.asarray(aggs, dtype=float)
+
+    na, nb = len(caps_a), len(caps_b)
+    Z_agg_A = np.empty((na, nb), dtype=float)
+    Z_agg_B = np.empty((na, nb), dtype=float)
+    Z_win_A = np.empty((na, nb), dtype=float)
+    Z_kind = np.empty((na, nb), dtype=object)
+    Z_gap = np.empty((na, nb), dtype=float)
+    Z_mean_cap = np.empty((na, nb), dtype=float)
+
+    rows: list[dict[str, float | str]] = []
+
+    for ia, beta_cap_a in enumerate(caps_a):
+        for ib, beta_cap_b in enumerate(caps_b):
+            cell_seed = int(seed) + ia * 1_000_003 + ib * 17_389
+            W, _, _ = compute_best_response_surface(
+                gp=gp,
+                aggs=aggs,
+                beta_cap_a=float(beta_cap_a),
+                beta_cap_b=float(beta_cap_b),
+                n_possessions=n_possessions,
+                seed=cell_seed,
+                verbose_sim=False,
+            )
+            i_eq, j_eq, kind = _equilibrium_cell_from_W(W, aggs)
+            agg_a_eq = float(aggs[i_eq])
+            agg_b_eq = float(aggs[j_eq])
+            win_a = float(W[i_eq, j_eq])
+
+            Z_agg_A[ia, ib] = agg_a_eq
+            Z_agg_B[ia, ib] = agg_b_eq
+            Z_win_A[ia, ib] = win_a
+            Z_kind[ia, ib] = kind
+            Z_gap[ia, ib] = float(beta_cap_a) - float(beta_cap_b)
+            Z_mean_cap[ia, ib] = 0.5 * (float(beta_cap_a) + float(beta_cap_b))
+
+            rows.append(
+                {
+                    "beta_cap_A": float(beta_cap_a),
+                    "beta_cap_B": float(beta_cap_b),
+                    "capability_gap": Z_gap[ia, ib],
+                    "mean_capability": Z_mean_cap[ia, ib],
+                    "agg_A_eq": agg_a_eq,
+                    "agg_B_eq": agg_b_eq,
+                    "win_rate_A_eq": win_a,
+                    "equilibrium_kind": kind,
+                }
+            )
+
+    df = pd.DataFrame(rows)
+    return df, caps_a, caps_b, Z_agg_A, Z_agg_B, Z_win_A, Z_gap, Z_mean_cap, Z_kind
+
+
+def plot_capability_interaction_heatmaps(
+    out_dir: Path,
+    caps_a: np.ndarray,
+    caps_b: np.ndarray,
+    Z_agg_A: np.ndarray,
+    Z_agg_B: np.ndarray,
+    Z_win_A: np.ndarray,
+    n_possessions: int,
+) -> None:
+    """2×2 panel: equilibrium aggressiveness (A, B) and Team A win rate vs capabilities."""
+    fig, axes = plt.subplots(2, 2, figsize=(11.5, 9.5))
+    extent = [
+        float(caps_b[0]),
+        float(caps_b[-1]),
+        float(caps_a[0]),
+        float(caps_a[-1]),
+    ]
+
+    def _panel(ax: plt.Axes, Z: np.ndarray, title: str, cbar_label: str, cmap: str, vmin: float, vmax: float) -> None:
+        im = ax.imshow(
+            Z,
+            origin="lower",
+            aspect="auto",
+            extent=extent,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+        )
+        plt.colorbar(im, ax=ax, label=cbar_label)
+        ax.set_xlabel("Team B capability (beta_cap)")
+        ax.set_ylabel("Team A capability (beta_cap)")
+        ax.set_title(title)
+        ax.grid(alpha=0.2)
+
+    _panel(
+        axes[0, 0],
+        Z_agg_A,
+        r"Equilibrium-style aggressiveness $\beta_A^{*}$",
+        r"$\beta_A$",
+        "magma",
+        float(np.nanmin(Z_agg_A)),
+        float(np.nanmax(Z_agg_A)),
+    )
+    _panel(
+        axes[0, 1],
+        Z_agg_B,
+        r"Equilibrium-style aggressiveness $\beta_B^{*}$",
+        r"$\beta_B$",
+        "cividis",
+        float(np.nanmin(Z_agg_B)),
+        float(np.nanmax(Z_agg_B)),
+    )
+    _panel(axes[1, 0], Z_win_A, "Team A win rate at selected cell", "P(A wins)", "viridis", 0.0, 1.0)
+
+    ax_sc = axes[1, 1]
+    # Long-form scatter: gap vs mean capability, colored by beta_A*
+    ga = np.array([float(caps_a[i]) for i in range(Z_agg_A.shape[0]) for _ in range(Z_agg_A.shape[1])])
+    gb = np.array([float(caps_b[j]) for _ in range(Z_agg_A.shape[0]) for j in range(Z_agg_A.shape[1])])
+    z_flat = Z_agg_A.ravel()
+    x_gap = ga - gb
+    y_mean = 0.5 * (ga + gb)
+    sc = ax_sc.scatter(x_gap, y_mean, c=z_flat, cmap="plasma", s=120, edgecolors="k", linewidths=0.35)
+    plt.colorbar(sc, ax=ax_sc, label=r"$\beta_A^{*}$")
+    ax_sc.set_xlabel(r"Capability gap $\beta_A - \beta_B$")
+    ax_sc.set_ylabel(r"Mean capability $(\beta_A + \beta_B)/2$")
+    ax_sc.set_title(r"$\beta_A^{*}$ vs gap and mean skill (grid cells)")
+    ax_sc.grid(alpha=0.3)
+
+    fig.suptitle(f"Capability × capability interaction (n_possessions={n_possessions} per grid cell)", fontsize=12)
+    fig.tight_layout()
+    out_path = out_dir / f"capability_interaction_heatmaps_n{n_possessions}.png"
+    fig.savefig(out_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
 
 
 def main() -> pd.DataFrame:
     gp = GameParams()
     out_dir = Path(__file__).resolve().parent / "exp_agg_capability"
     out_dir.mkdir(parents=True, exist_ok=True)
-    aggs = np.linspace(0.2, 0.9, 50)
-    beta_caps = (0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2)
-    # df = run_sweep(gp=gp, beta_caps=beta_caps, aggs=aggs, n_possessions=5, seed=GLOBAL_SEED)
-    # plot_model_functions(gp=gp, out_dir=out_dir, beta_caps=beta_caps)
-    # gap_df = plot_win_rate_vs_aggressiveness_by_capability_gap(
-    #     gp=gp,
-    #     out_dir=out_dir,
-    #     aggs=aggs,
-    #     capability_gaps=np.linspace(0.5, 1.0, 6),
-    #     team_a_capability=0.5,
-    #     team_a_agg=0.6,
-    #     n_possessions=500_000,
-    #     seed=GLOBAL_SEED
-    # )
-    W, agg_A_star, agg_B_star = compute_best_response_surface(
+    aggs = np.linspace(0.2, 0.9, 24)
+    cap_grid = np.linspace(0.6, 1.0, 7)
+    n_poss = 10
+    df, caps_a, caps_b, Z_agg_A, Z_agg_B, Z_win_A, _, _, _ = sweep_capability_equilibrium_grid(
         gp=gp,
         aggs=aggs,
-        beta_cap_a=0.5,
-        beta_cap_b=0.4,
-        n_possessions=100,
+        capability_grid=cap_grid,
+        n_possessions=n_poss,
         seed=GLOBAL_SEED,
     )
-    plot_best_response_surface(
+    df.to_csv(out_dir / f"capability_equilibrium_sweep_n{n_poss}.csv", index=False)
+    plot_capability_interaction_heatmaps(
         out_dir=out_dir,
-        aggs=aggs,
-        W=W,
-        agg_A_star=agg_A_star,
-        agg_B_star=agg_B_star,
-        beta_cap_a=0.5,
-        beta_cap_b=0.4,
+        caps_a=caps_a,
+        caps_b=caps_b,
+        Z_agg_A=Z_agg_A,
+        Z_agg_B=Z_agg_B,
+        Z_win_A=Z_win_A,
+        n_possessions=n_poss,
     )
-
-    # print(df.head(12).to_string(index=False))
-    # print(gap_df.head(12).to_string(index=False))
-    # print(f"... ({len(df)} rows)")
-    # print(f"Saved figures under {out_dir}")
-    # return df
+    print(f"Saved {len(df)} sweep rows and heatmaps under {out_dir}")
+    return df
 
 
 if __name__ == "__main__":
     main()
+
+
+    # W, agg_A_star, agg_B_star = compute_best_response_surface(
+    #     gp=gp,
+    #     aggs=aggs,
+    #     beta_cap_a=0.5,
+    #     beta_cap_b=0.4,
+    #     n_possessions=100,
+    #     seed=GLOBAL_SEED,
+    # )
+    # plot_best_response_surface(
+    #     out_dir=out_dir,
+    #     aggs=aggs,
+    #     W=W,
+    #     agg_A_star=agg_A_star,
+    #     agg_B_star=agg_B_star,
+    #     beta_cap_a=0.5,
+    #     beta_cap_b=0.4,
+    # )
