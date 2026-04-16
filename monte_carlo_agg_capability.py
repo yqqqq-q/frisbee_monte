@@ -415,25 +415,128 @@ def plot_win_rate_vs_aggressiveness_by_capability_gap(
     return result_df
 
 
+def compute_best_response_surface(
+    gp: GameParams,
+    aggs: np.ndarray,
+    beta_cap_a: float,
+    beta_cap_b: float,
+    n_possessions: int = 5_000,
+    seed: int = GLOBAL_SEED,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Compute Team A payoff surface over the full aggressiveness grid.
+
+    Returns
+    -------
+    W:
+        ``W[i, j] = win_rate_A`` at ``agg_A = aggs[i]``, ``agg_B = aggs[j]``.
+    agg_A_star:
+        Team A best response for each fixed ``agg_B``.
+    agg_B_star:
+        Team B best response for each fixed ``agg_A`` (minimizes Team A payoff).
+    """
+    rng = np.random.default_rng(seed)
+    set_simulation_rng(rng)
+    aggs = np.asarray(aggs, dtype=float)
+    W = np.empty((len(aggs), len(aggs)), dtype=float)
+
+    for i, agg_a in enumerate(aggs):
+        for j, agg_b in enumerate(aggs):
+            team_a = build_team(beta_cap_a, float(agg_a), 1)
+            team_b = build_team(beta_cap_b, float(agg_b), -1)
+            stats = simulate_possessions(team_a, team_b, gp, rng, n_possessions)
+            total_goals = stats.team_a_score + stats.team_b_score
+            W[i, j] = (
+                float(stats.team_a_score) / float(total_goals) if total_goals > 0 else float("nan")
+            )
+
+    a_star_idx = np.nanargmax(W, axis=0)
+    b_star_idx = np.nanargmin(W, axis=1)
+    return W, aggs[a_star_idx], aggs[b_star_idx]
+
+
+def plot_best_response_surface(
+    out_dir: Path,
+    aggs: np.ndarray,
+    W: np.ndarray,
+    agg_A_star: np.ndarray,
+    agg_B_star: np.ndarray,
+    beta_cap_a: float,
+    beta_cap_b: float,
+) -> None:
+    """
+    Plot Team A payoff surface with both players' best-response curves.
+    """
+    fig, ax = plt.subplots(figsize=(7.5, 6.2))
+    im = ax.imshow(
+        W,
+        origin="lower",
+        aspect="auto",
+        extent=[float(aggs[0]), float(aggs[-1]), float(aggs[0]), float(aggs[-1])],
+        cmap="viridis",
+        vmin=0.0,
+        vmax=1.0,
+    )
+    plt.colorbar(im, ax=ax, label="Team A win rate")
+
+    # For each fixed agg_B (x-axis), Team A chooses agg_A (y-axis) to maximize W.
+    ax.plot(aggs, agg_A_star, color="red", linewidth=2.2, label=r"$\beta_A^*(\beta_B)$")
+    # For each fixed agg_A (y-axis), Team B chooses agg_B (x-axis) to minimize W.
+    ax.plot(agg_B_star, aggs, color="white", linewidth=2.2, label=r"$\beta_B^*(\beta_A)$")
+
+    ax.set_xlabel("Team B aggressiveness")
+    ax.set_ylabel("Team A aggressiveness")
+    ax.set_title(
+        "Best-Response Surface\n"
+        f"(beta_cap_A={beta_cap_a:.2f}, beta_cap_B={beta_cap_b:.2f})"
+    )
+    ax.grid(alpha=0.15)
+    ax.legend(loc="upper right", framealpha=0.95)
+    fig.tight_layout()
+    fig.savefig(
+        out_dir / f"best_response_surface_beta_cap_A_{beta_cap_a:.2f}_beta_cap_B_{beta_cap_b:.2f}.png",
+        dpi=180,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+
 
 
 def main() -> pd.DataFrame:
     gp = GameParams()
     out_dir = Path(__file__).resolve().parent / "exp_agg_capability"
     out_dir.mkdir(parents=True, exist_ok=True)
-    aggs = np.linspace(0.4, 1.0, 50)
+    aggs = np.linspace(0.2, 0.9, 50)
     beta_caps = (0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2)
     # df = run_sweep(gp=gp, beta_caps=beta_caps, aggs=aggs, n_possessions=5, seed=GLOBAL_SEED)
     # plot_model_functions(gp=gp, out_dir=out_dir, beta_caps=beta_caps)
-    gap_df = plot_win_rate_vs_aggressiveness_by_capability_gap(
+    # gap_df = plot_win_rate_vs_aggressiveness_by_capability_gap(
+    #     gp=gp,
+    #     out_dir=out_dir,
+    #     aggs=aggs,
+    #     capability_gaps=np.linspace(0.5, 1.0, 6),
+    #     team_a_capability=0.5,
+    #     team_a_agg=0.6,
+    #     n_possessions=500_000,
+    #     seed=GLOBAL_SEED
+    # )
+    W, agg_A_star, agg_B_star = compute_best_response_surface(
         gp=gp,
+        aggs=aggs,
+        beta_cap_a=0.5,
+        beta_cap_b=0.4,
+        n_possessions=100,
+        seed=GLOBAL_SEED,
+    )
+    plot_best_response_surface(
         out_dir=out_dir,
         aggs=aggs,
-        capability_gaps=np.linspace(0.4, 1.0, 6),
-        team_a_capability=0.3,
-        team_a_agg=0.4,
-        n_possessions=500_000,
-        seed=GLOBAL_SEED,
+        W=W,
+        agg_A_star=agg_A_star,
+        agg_B_star=agg_B_star,
+        beta_cap_a=0.5,
+        beta_cap_b=0.4,
     )
 
     # print(df.head(12).to_string(index=False))
