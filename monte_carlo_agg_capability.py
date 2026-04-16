@@ -6,8 +6,11 @@ Monte Carlo study: aggressiveness (Beta throw distances) vs capability
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import lgamma
+from pathlib import Path
 from typing import Callable
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -17,6 +20,22 @@ from TeamParam import TeamParam
 # Reproducibility: single stream for a simulation block (set before building teams).
 _SIM_RNG: np.random.Generator | None = None
 GLOBAL_SEED = 42
+TP_INPUT_MIN = -10.0
+TP_INPUT_MAX_FRAC_DMAX = 0.65
+
+
+def _series_cmap_color(index: int, n_series: int, cmap_name: str) -> tuple[float, float, float, float]:
+    """Series color sampled evenly along a named matplotlib colormap."""
+    cmap = plt.get_cmap(cmap_name)
+    if n_series <= 0:
+        return tuple(float(c) for c in cmap(0.5))
+    t = (index + 0.5) / float(n_series)
+    return tuple(float(c) for c in cmap(t))
+
+
+def _gist_heat_color(index: int, n_series: int) -> tuple[float, float, float, float]:
+    """Win-rate curves: ``gist_heat``."""
+    return _series_cmap_color(index, n_series, "gist_heat")
 
 
 def set_simulation_rng(rng: np.random.Generator) -> None:
@@ -33,7 +52,8 @@ def _rng() -> np.random.Generator:
 
 def make_distance_sampler(agg: float) -> Callable[[float], float]:
     """
-    z ~ Beta(alpha, beta), z in [0, 1]; d = z * d_max.
+    z ~ Beta(alpha, beta), z in [0, 1];
+    d = TP_INPUT_MIN + z * (TP_INPUT_MAX_FRAC_DMAX * d_max - TP_INPUT_MIN).
 
     alpha = 1 + 5 * agg, beta = 1 + 5 * (1 - agg), agg in [0, 1].
 
@@ -44,24 +64,41 @@ def make_distance_sampler(agg: float) -> Callable[[float], float]:
 
     def sample_d(d_max: float) -> float:
         z = float(_rng().beta(alpha, beta))
-        return z * float(d_max)
+        d_hi = TP_INPUT_MAX_FRAC_DMAX * float(d_max)
+        return TP_INPUT_MIN + z * (d_hi - TP_INPUT_MIN)
 
     return sample_d
 
 
-def completion_probability(beta_cap: float) -> Callable[[float, float], float]:
-    """T(d) = exp(-beta_cap * d); smaller beta_cap => stronger team."""
+def completion_probability(beta_cap: float):
+    """
+    Build distance-based completion probability with capability in [0, 1].
+    - beta_cap = 1.0 is strongest.
+    - Smaller beta_cap means weaker completion at a given distance.
+    - For beta_cap = 1.0:
+        T(TP_INPUT_MIN) = 1.0
+        T(TP_INPUT_MAX_FRAC_DMAX * d_max) = 0.7
+    """
+    beta_cap = float(np.clip(beta_cap, 0.0, 1.0))
+    # 0 < gamma < 1 gives a concave-down shape on the normalized interval.
+    gamma = 0.5
 
-    bc = float(beta_cap)
+    def T(d: float, d_max: float) -> float:
+        d_lo = TP_INPUT_MIN
+        d_hi = TP_INPUT_MAX_FRAC_DMAX * float(d_max)
+        span = max(d_hi - d_lo, 1e-9)
+        x = np.clip((float(d) - d_lo) / span, 0.0, 1.0)
 
-    def T(d: float, _d_max: float) -> float:
-        return float(np.exp(-bc * float(d)))
+        # Strongest team (beta=1) drops to 0.7 at x=1.
+        # Weaker teams (smaller beta) have larger drop across distance.
+        drop_amplitude = 1.0 - 0.7 * beta_cap
+        p = 1.0 - drop_amplitude * (x ** gamma)
+        return float(np.clip(p, 0.0, 1.0))
 
     return T
 
-
 def build_team(beta_cap: float, agg: float, attack_sign: int) -> TeamParam:
-    """Continuous distance policy + exponential completion decay."""
+    """Continuous distance policy + quadratic completion decay."""
     return TeamParam(
         T=completion_probability(beta_cap),
         P=make_distance_sampler(agg),
@@ -128,7 +165,7 @@ def simulate_possessions(
                     break
             else:
                 offense = team_b if offense is team_a else team_a
-
+    print(f"Simulated {n_possessions} possessions, {total_throws} throws, {completions} completions, {turnovers} turnovers, total distance {total_distance:.1f}")
     return PossessionSimStats(
         team_a_score=team_a_score,
         team_b_score=team_b_score,
@@ -203,11 +240,207 @@ def run_sweep(
     return pd.DataFrame(rows)
 
 
+def _beta_pdf(z: np.ndarray, alpha: float, beta: float) -> np.ndarray:
+    """Numerically stable Beta(alpha, beta) density on z in (0, 1)."""
+    z_safe = np.clip(z, 1e-9, 1.0 - 1e-9)
+    log_norm = lgamma(alpha) + lgamma(beta) - lgamma(alpha + beta)
+    log_pdf = (alpha - 1.0) * np.log(z_safe) + (beta - 1.0) * np.log(1.0 - z_safe) - log_norm
+    return np.exp(log_pdf)
+
+
+def plot_model_functions(
+    gp: GameParams,
+    out_dir: Path,
+    aggs_for_plot: tuple[float, ...] = (0.1, 0.3, 0.5, 0.7, 0.9),
+    beta_caps: tuple[float, ...] = (0.08, 0.05, 0.03),
+) -> None:
+    """
+    Plot the underlying policy/completion functions for selected aggs and beta-caps.
+    """
+    z = np.linspace(0.001, 0.999, 500)
+    d_max_hi = TP_INPUT_MAX_FRAC_DMAX * gp.d_max
+    d = np.linspace(TP_INPUT_MIN, d_max_hi, 500)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+
+    n_agg = len(aggs_for_plot)
+    for i, agg in enumerate(aggs_for_plot):
+        alpha = 1.0 + 5.0 * float(agg)
+        beta = 1.0 + 5.0 * (1.0 - float(agg))
+        pdf = _beta_pdf(z, alpha, beta)
+        ax1.plot(
+            TP_INPUT_MIN + z * (d_max_hi - TP_INPUT_MIN),
+            pdf,
+            color=_series_cmap_color(i, n_agg, "spring"),
+            label=f"agg={agg:.1f}",
+        )
+
+    ax1.set_title("Throw Distance Distribution")
+    ax1.set_xlabel("Throw distance d")
+    ax1.set_ylabel("Density")
+    ax1.grid(alpha=0.3)
+    ax1.legend(loc="upper right", fontsize=8, framealpha=0.95)
+
+    n_beta = len(beta_caps)
+    for i, beta_cap in enumerate(beta_caps):
+        T = completion_probability(float(beta_cap))
+        p = np.array([T(di, gp.d_max) for di in d], dtype=float)
+        ax2.plot(d, p, color=_series_cmap_color(i, n_beta, "summer"), label=f"beta_cap={beta_cap:.2f}")
+
+    ax2.set_title("Completion Function")
+    ax2.set_xlabel("Throw distance d")
+    ax2.set_ylabel("P(complete)")
+    ax2.set_ylim(0.0, 1.02)
+    ax2.grid(alpha=0.3)
+    ax2.legend(loc="lower right", fontsize=8, framealpha=0.95)
+
+    fig.tight_layout()
+    fig.savefig(out_dir / "model_functions_aggs_beta_caps.png", dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_win_rate_vs_aggressiveness_by_capability_gap(
+    gp: GameParams,
+    out_dir: Path,
+    aggs: np.ndarray,
+    capability_gaps: tuple[float, ...] = (1.0, 1.2, 1.4, 1.6, 1.8),
+    team_a_capability: float = 0.2,
+    team_a_agg: float = 0.4,
+    n_possessions: int = 5_000,
+    seed: int = GLOBAL_SEED,
+) -> pd.DataFrame:
+    """
+    Team B decision plot: how aggressiveness affects *your* win rate vs a fixed Team A.
+
+    Team A is fixed at ``team_a_capability`` skill and ``team_a_agg`` aggressiveness.
+    Team B skill is ``capability_gap * team_a_capability`` (clipped to [0, 1]); interpret
+    ``capability_gap`` as how much of Team A's skill you have (so Team A is stronger
+    when this fraction is < 1, and equal when it is 1).
+
+    The x-axis sweeps *your* (Team B) aggressiveness over ``aggs``.
+    """
+    rng = np.random.default_rng(seed)
+    set_simulation_rng(rng)
+    rows: list[dict[str, float]] = []
+    agg_a = float(np.clip(team_a_agg, 0.0, 1.0))
+    beta_cap_a_fixed = float(np.clip(team_a_capability, 0.0, 1.0))
+
+    for gap in capability_gaps:
+        beta_cap_a = beta_cap_a_fixed
+        beta_cap_b = float(np.clip(float(gap) * beta_cap_a, 0.0, 1.0))
+
+        for agg_b in aggs:
+            agg_b = float(agg_b)
+            team_a = build_team(beta_cap_a, agg_a, 1)
+            team_b = build_team(beta_cap_b, agg_b, -1)
+            stats = simulate_possessions(team_a, team_b, gp, rng, n_possessions)
+            total_goals = stats.team_a_score + stats.team_b_score
+            win_rate_b = (
+                float(stats.team_b_score) / float(total_goals) if total_goals > 0 else float("nan")
+            )
+            win_rate_a = (
+                float(stats.team_a_score) / float(total_goals) if total_goals > 0 else float("nan")
+            )
+            skill_mult_a_vs_b = float("inf") if beta_cap_b <= 0.0 else float(beta_cap_a / beta_cap_b)
+            rows.append(
+                {
+                    "agg_A": agg_a,
+                    "agg_B": agg_b,
+                    "capability_gap": float(gap),
+                    "beta_cap_A": beta_cap_a,
+                    "beta_cap_B": beta_cap_b,
+                    "skill_mult_A_vs_B": skill_mult_a_vs_b,
+                    "win_rate_B": win_rate_b,
+                    "win_rate_A": win_rate_a,
+                }
+            )
+
+    result_df = pd.DataFrame(rows)
+    fig, ax = plt.subplots(figsize=(13, 5.2))
+    n_gaps = len(capability_gaps)
+    for i, gap in enumerate(capability_gaps):
+        sub = result_df[result_df["capability_gap"] == float(gap)].sort_values("agg_B")
+        beta_a = float(sub["beta_cap_A"].iloc[0])
+        beta_b = float(sub["beta_cap_B"].iloc[0])
+        if beta_b <= 0.0:
+            label = "You are far weaker than Team A"
+        elif np.isclose(beta_a, beta_b):
+            label = "Even skill vs Team A"
+        else:
+            mult = beta_a / beta_b
+            if mult > 1.0:
+                label = f"Team A is {mult:.2f}× stronger (Team B Skill={beta_b:.2f})"
+            else:
+                label = f"You are {1.0 / mult:.2f}× stronger (Team B Skill={beta_b:.2f})"
+        ax.plot(
+            sub["agg_B"],
+            sub["win_rate_B"],
+            marker="o",
+            linewidth=1.8,
+            color=_gist_heat_color(i, n_gaps),
+            label=label,
+        )
+
+    ax.set_xlabel("Team B aggressiveness")
+    ax.set_ylabel("Team B win rate")
+    ax.set_title(
+        "Win Rate vs Aggressiveness\n"
+        f"(Team A: skill={beta_cap_a_fixed:.2f}, aggressiveness={agg_a:.2f})"
+    )
+    ys = result_df["win_rate_B"].to_numpy(dtype=float)
+    mask = np.isfinite(ys)
+    if not np.any(mask):
+        ax.set_ylim(0.0, 1.0)
+    else:
+        y_lo, y_hi = float(np.min(ys[mask])), float(np.max(ys[mask]))
+        span = y_hi - y_lo
+        pad = max(1e-3, 0.08 * span) if span > 0 else 0.03
+        ax.set_ylim(max(0.0, y_lo - pad), min(1.0, y_hi + pad))
+    ax.grid(alpha=0.3)
+    legend = ax.legend(
+        # loc = 'left',
+        bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0.0,
+        fontsize=8,
+        framealpha=0.95,
+    )
+    fig.tight_layout()
+    fig.savefig(
+        out_dir / f"win_rate_vs_aggressiveness_capability_gaps_team_a_{beta_cap_a_fixed:.2f}_agg_{agg_a:.2f}.png",
+        dpi=180,
+        bbox_inches="tight",
+        bbox_extra_artists=(legend,),
+    )
+    plt.close(fig)
+    return result_df
+
+
+
+
 def main() -> pd.DataFrame:
-    df = run_sweep(n_possessions=10)
-    print(df.head(12).to_string(index=False))
-    print(f"... ({len(df)} rows)")
-    return df
+    gp = GameParams()
+    out_dir = Path(__file__).resolve().parent / "exp_agg_capability"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    aggs = np.linspace(0.4, 1.0, 50)
+    beta_caps = (0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2)
+    # df = run_sweep(gp=gp, beta_caps=beta_caps, aggs=aggs, n_possessions=5, seed=GLOBAL_SEED)
+    # plot_model_functions(gp=gp, out_dir=out_dir, beta_caps=beta_caps)
+    gap_df = plot_win_rate_vs_aggressiveness_by_capability_gap(
+        gp=gp,
+        out_dir=out_dir,
+        aggs=aggs,
+        capability_gaps=np.linspace(0.4, 1.0, 6),
+        team_a_capability=0.3,
+        team_a_agg=0.4,
+        n_possessions=500_000,
+        seed=GLOBAL_SEED,
+    )
+
+    # print(df.head(12).to_string(index=False))
+    # print(gap_df.head(12).to_string(index=False))
+    # print(f"... ({len(df)} rows)")
+    # print(f"Saved figures under {out_dir}")
+    # return df
 
 
 if __name__ == "__main__":
