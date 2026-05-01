@@ -722,48 +722,49 @@ def main() -> pd.DataFrame:
     gp = GameParams()
     out_dir = Path(__file__).resolve().parent / "exp_agg_capability"
     out_dir.mkdir(parents=True, exist_ok=True)
-    aggs = np.linspace(0.2, 0.9, 24)
+    aggs = np.linspace(0.2, 0.9, 100)
     cap_grid = np.linspace(0.6, 1.0, 7)
-    n_poss = 10
-    df, caps_a, caps_b, Z_agg_A, Z_agg_B, Z_win_A, _, _, _ = sweep_capability_equilibrium_grid(
+    n_poss = 100_000
+    # df, caps_a, caps_b, Z_agg_A, Z_agg_B, Z_win_A, _, _, _ = sweep_capability_equilibrium_grid(
+    #     gp=gp,
+    #     aggs=aggs,
+    #     capability_grid=cap_grid,
+    #     n_possessions=n_poss,
+    #     seed=GLOBAL_SEED,
+    # )
+    # df.to_csv(out_dir / f"capability_equilibrium_sweep_n{n_poss}.csv", index=False)
+    # plot_capability_interaction_heatmaps(
+    #     out_dir=out_dir,
+    #     caps_a=caps_a,
+    #     caps_b=caps_b,
+    #     Z_agg_A=Z_agg_A,
+    #     Z_agg_B=Z_agg_B,
+    #     Z_win_A=Z_win_A,
+    #     n_possessions=n_poss,
+    # )
+    # print(f"Saved {len(df)} sweep rows and heatmaps under {out_dir}")
+    # return df
+
+
+
+    W, agg_A_star, agg_B_star = compute_best_response_surface(
         gp=gp,
         aggs=aggs,
-        capability_grid=cap_grid,
-        n_possessions=n_poss,
+        beta_cap_a=0.9,
+        beta_cap_b=0.9,
+        n_possessions=50_000,
         seed=GLOBAL_SEED,
     )
-    df.to_csv(out_dir / f"capability_equilibrium_sweep_n{n_poss}.csv", index=False)
-    plot_capability_interaction_heatmaps(
+    plot_best_response_surface(
         out_dir=out_dir,
-        caps_a=caps_a,
-        caps_b=caps_b,
-        Z_agg_A=Z_agg_A,
-        Z_agg_B=Z_agg_B,
-        Z_win_A=Z_win_A,
-        n_possessions=n_poss,
+        aggs=aggs,
+        W=W,
+        agg_A_star=agg_A_star,
+        agg_B_star=agg_B_star,
+        beta_cap_a=0.9,
+        beta_cap_b=0.9,
     )
-    print(f"Saved {len(df)} sweep rows and heatmaps under {out_dir}")
-    return df
 
 
 if __name__ == "__main__":
     main()
-
-
-    # W, agg_A_star, agg_B_star = compute_best_response_surface(
-    #     gp=gp,
-    #     aggs=aggs,
-    #     beta_cap_a=0.5,
-    #     beta_cap_b=0.4,
-    #     n_possessions=100,
-    #     seed=GLOBAL_SEED,
-    # )
-    # plot_best_response_surface(
-    #     out_dir=out_dir,
-    #     aggs=aggs,
-    #     W=W,
-    #     agg_A_star=agg_A_star,
-    #     agg_B_star=agg_B_star,
-    #     beta_cap_a=0.5,
-    #     beta_cap_b=0.4,
-    # )
